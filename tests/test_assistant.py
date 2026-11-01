@@ -29,6 +29,13 @@ class AssistantTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 Settings(timeout_seconds=value)
 
+    def test_context_must_leave_room_for_input(self):
+        for value in (0, -1, 1024, 1280, 4096.5, True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                Settings(context_tokens=value)
+        self.assertEqual(Settings(context_tokens=1281).context_tokens, 1281)
+        self.assertEqual(Settings(context_tokens=8192).context_tokens, 8192)
+
 
 class TerminalTests(unittest.TestCase):
     def run_cli(self, argv, reply=None, error=None):
@@ -69,3 +76,13 @@ class TerminalTests(unittest.TestCase):
                 status, _, errors = self.run_cli(args)
                 self.assertEqual(status, 1)
                 self.assertIn("Error:", errors)
+
+    def test_context_option_reaches_client_and_rejects_invalid_budget(self):
+        with patch("ai_agent.cli.OllamaClient") as client, \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            client.return_value.chat.return_value = ModelReply("Answer")
+            self.assertEqual(main(["ask", "hello", "--context", "8192"]), 0)
+            self.assertEqual(client.call_args.args[0].context_tokens, 8192)
+            client.reset_mock()
+            self.assertEqual(main(["ask", "hello", "--context", "1280"]), 1)
+            client.assert_not_called()

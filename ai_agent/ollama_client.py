@@ -6,7 +6,7 @@ import json
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
-from .config import OLLAMA_CHAT_URL, Settings
+from .config import OLLAMA_CHAT_URL, TEMPLATE_RESERVE_TOKENS, Settings
 
 
 class ModelError(Exception):
@@ -35,13 +35,17 @@ class OllamaClient:
         )
         if response_schema is not None:
             estimated_input += len(json.dumps(response_schema, ensure_ascii=False).encode("utf-8"))
-        input_budget = self.settings.context_tokens - self.settings.output_tokens - 256
+        input_budget = self.settings.context_tokens - self.settings.output_tokens - TEMPLATE_RESERVE_TOKENS
         if estimated_input > input_budget:
+            required_context = estimated_input + self.settings.output_tokens + TEMPLATE_RESERVE_TOKENS
+            suggested_context = 1 << (required_context - 1).bit_length()
             raise ModelError(
                 f"Request exceeds the conservative context budget: estimated input {estimated_input}, "
                 f"available {input_budget} (byte-based estimate, not an exact token count). "
                 f"Context: {self.settings.context_tokens}; output reserve: {self.settings.output_tokens}; "
-                "template reserve: 256. Select a smaller file or shorten the instructions. "
+                f"template reserve: {TEMPLATE_RESERVE_TOKENS}. "
+                f"Rerun with --context {suggested_context} if your model and available memory support it, "
+                "or select a smaller file or shorten the instructions. "
                 "No content was silently truncated."
             )
         payload = {

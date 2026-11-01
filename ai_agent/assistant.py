@@ -36,6 +36,13 @@ FILE_INSTRUCTIONS = (
     "Java checks exclude project dependencies. Never claim execution or verified behavior."
 )
 
+REPAIR_INSTRUCTIONS = (
+    " Review syntax AND logic against the requested behavior, including calculations and edge cases. "
+    "Passing syntax does not prove correctness. Make the smallest justified repairs; do not guess missing requirements. "
+    "Additional user instructions supplement this repair task. If comments are requested, explain actual corrections. "
+    "Describe only changes present in your proposal; do not claim a repair when only adding comments."
+)
+
 
 class CodingAssistant:
     def __init__(self, client: ChatClient) -> None:
@@ -66,7 +73,8 @@ class CodingAssistant:
         if not request.strip():
             raise ValueError("Describe the requested change.")
         reply = self.client.chat([
-            {"role": "system", "content": FILE_INSTRUCTIONS + (
+            {"role": "system", "content": FILE_INSTRUCTIONS
+             + (REPAIR_INSTRUCTIONS if operation == "fix" else "") + (
                 " Return JSON: explanation (brief string), content (complete file string, no Markdown or omissions). "
                 "If no change is needed, return the original content."
             )},

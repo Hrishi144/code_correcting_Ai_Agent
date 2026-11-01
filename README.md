@@ -7,7 +7,7 @@ new code. File changes are previewed, validated, and saved only after approval.
 ## Run
 
 Prerequisites: Python 3.10 or newer, a running Ollama server, and the selected
-`qwen2.5-coder:3b` model installed locally. No additional Python packages are needed.
+`qwen2.5-coder:7b` model installed locally. No additional Python packages are needed.
 Java validation also requires `javac` on PATH (verified here with JDK 25.0.3).
 Downloads and installations are managed by the user. The application does not
 start Ollama, install models, or install a JDK.
@@ -30,7 +30,8 @@ standard input also supports piped, multiline requests. A bare reserved command
 word such as `fix` is interpreted as a subcommand; use `ask "fix"` to ask about it.
 
 ```powershell
-python -m ai_agent ask --model qwen2.5-coder:3b --timeout 180 "Explain Python dictionaries."
+python -m ai_agent ask --model qwen2.5-coder:7b --timeout 180 "Explain Python dictionaries."
+python -m ai_agent ask --context 8192 "Explain Python dictionaries."
 python -m ai_agent --help
 ```
 
@@ -64,8 +65,11 @@ python -m ai_agent code --workspace "D:\code\Ai_agent" --file "calculator.py" --
 ```
 
 `--output` refuses an existing file. `--file` requires an existing file. The model
-does not choose the destination. `--model` and `--timeout` are available after each
-subcommand.
+does not choose the destination. `--model`, `--timeout`, and `--context` are available
+after each subcommand. `--context` changes both Ollama's context setting and the
+application's input budget; the default remains 4096. Larger contexts require more
+memory and must be supported by your model. Context must exceed the 1024-token
+output reserve plus the 256-token template reserve.
 
 ## Review and saving
 
@@ -97,7 +101,8 @@ UTF-8 and LF. Backups can contain sensitive source data; manage them as source f
   are rejected. Protected folders cannot be selected as a workspace to bypass
   these checks. The app itself creates its hidden backup/staging files.
 - File contents and model output cannot authorize additional reads or writes.
-  There are no model-callable filesystem or shell tools.
+  There are no model-callable filesystem or shell tools. The opt-in checkout mode
+  described below executes code, which itself can have filesystem or other side effects.
 
 | Language | Check | Limit |
 | --- | --- | --- |
@@ -116,6 +121,105 @@ Passing these checks does not establish correct behavior. Model explanations can
 be wrong; review the proposed change. Path checks and save rechecks are application
 controls, not an OS sandbox or a cross-process file lock. There remains a narrow
 race between the final file check and replacement if another process changes it.
+
+## Checking logic and following repair instructions
+
+`fix` always asks the model to review syntax and logic with the smallest justified
+repairs. A custom `--request` supplements that task; it does not replace it. Include
+expected behavior and concrete examples, rather than only asking for comments.
+The model may still miss errors or ignore instructions. Its explanation is marked
+as unverified. By default the preview reports that behavior was not tested; opt-in
+checkout mode reports the selected behavioral checks separately.
+
+For existing Python files, `fix` compares syntax trees without executing code.
+If a proposal changes only comments or formatting, the preview warns that it does
+not demonstrate a logic repair. This is advisory: comment-only changes may be
+intentional. A changed syntax tree does not prove correctness either.
+
+For the shopping-cart example, an optional script checks eight behavioral cases:
+the sample cart, default rates, an empty cart, full discount, nonpositive quantity,
+negative price, invalid discount, and negative tax. Run it from this project folder:
+
+```powershell
+python examples/check_checkout.py "D:\code\Python\error.py"
+```
+
+**This explicit command executes the selected file, including its top-level code,
+with your normal permissions. Review the file first.** It is not a sandbox or a
+general-purpose verifier. The automated mode below uses the same fixed tests only
+when explicitly enabled. The script
+itself does not rewrite the selected file, but code you execute may have side effects.
+The file must define `checkout(items, discount_percent=0, tax_percent=0)` returning
+`subtotal`, `discount`, `tax`, and `total`. The sample cart must produce 500, 50, 45,
+and 495 respectively with 10% discount and 10% tax.
+
+Run the checks before and after a reviewed repair, using a copy if you want to keep
+the original. Supply the failed expectations to `--request`, for example:
+
+```powershell
+python -m ai_agent fix --workspace "D:\code\Python" --file "error.py" --request "Quantity must be positive. Subtotal sums price times quantity. Discount is a percentage; tax applies after discount. The sample cart with 10% discount and tax must total 495. Comment each correction."
+```
+
+Other programs need tests based on their own requirements. Passing these eight
+checkout checks covers those cases only; it is not proof of correctness for all inputs.
+
+## Automate checkout repairs
+
+For this standalone Python checkout example, combine test, repair, and retest in
+one command. Ollama must be running with the selected model installed:
+
+```powershell
+python -m ai_agent fix --workspace "D:\code\Python" --file "error.py" --check checkout --allow-execution --max-attempts 3 --context 8192 --request "Add brief comments explaining each correction."
+```
+
+`--check checkout` selects the fixed eight-case suite and supplies its expected
+behavior to the model. It is not a general test generator. Other programs and
+languages are not supported by this automated checker. `--max-attempts` limits
+model proposals to 1-5 (default 3); it does not include the original test run or
+the final recheck before saving.
+
+The example explicitly uses `--context 8192` to leave room for proposals that grow
+during retries, such as when the model adds comments. The default 4096 context leaves
+2816 for the conservative input estimate; 8192 leaves 6912 with the same reserves.
+An input estimate of 3614 therefore fits the latter. This addresses the input limit,
+not the accuracy of a repair. The application never grows context automatically.
+
+**`--allow-execution` authorizes execution of the original and model-proposed
+Python, including top-level code, before save approval.** Each run uses a temporary
+copy in a separate Python process with a 10-second worker timeout and no terminal
+input. This is not an OS sandbox: executed code has your normal permissions and
+can access files, the network, or start other processes. The temporary directory,
+isolated imports, and timeout do not contain those side effects. Use trusted code
+in an environment suitable for executing model proposals. Test reports are not
+tamper-proof against hostile code. File-save approval is separate from execution.
+
+The workflow:
+
+1. Validate the original syntax and run checkout tests if it parses.
+2. If the original passes all eight checks, exit without calling the model or saving.
+   Extra requests such as adding comments are not applied in that case; use
+   `code --file` for an intentional edit to already-passing code.
+3. Send the source, checkout requirements, and current failures to the model.
+4. Syntax-check and test each proposal in a fresh temporary directory. Retry failed
+   proposals with the latest source and failures, up to the attempt limit.
+5. Stop on a passing proposal or when attempts are exhausted. Worker availability
+   errors, malformed model replies, network errors, and context-budget errors stop
+   the workflow; they are not automatically retried.
+6. Show the final diff against the original. Failed/unavailable checks block saving.
+   On success, ask for `save`, rerun the checkout checks, then use the existing
+   original-file rechecks and backup procedure to save.
+
+The application does not overwrite the selected file during these repair attempts.
+Executed code can still have its own side effects. With redirected input/output,
+explicitly enabled execution still occurs, but the resulting proposal is preview-only.
+Subprocess output is discarded; failures are reported as compact test names and
+limited exception summaries to preserve the model's input budget. Source is never
+silently shortened. Large files, added comments, or requests can exceed the existing
+context budget even in this mode. Python imports from neighboring project files are
+not supported: only the selected standalone source is staged.
+
+The tests verify specified checkout behavior, not comment quality or all possible
+inputs. Passing them does not guarantee the model made every requested change.
 
 ## Outputs and status
 
@@ -141,6 +245,9 @@ ai_agent/
   ollama_client.py  Local HTTP requests, context budget, and response handling
   workspace.py      Path restrictions and selected-file snapshots
   validation.py     Python/JSON checks and isolated Java compilation
+  behavior.py       Opt-in timed execution of checkout candidates
+  checkout_checks.py Fixed checkout expectations and worker reporting
+  repair.py         Bounded test/repair/retest workflow
   changes.py        Diffs, change detection, backups, and approved saves
 tests/              Automated tests and separate opt-in live model checks
 ```
@@ -152,7 +259,8 @@ destination path. `ProposedChange` supplies the diff and validation result. Afte
 interactive approval, `save_change` rechecks the file and commits the change.
 
 Requests use Ollama's local `/api/chat` endpoint at `127.0.0.1:11434`, with streaming
-disabled, a 4096-token context setting and a 1024-token output cap. The first
+disabled, a default 4096-token context setting (configurable with `--context`) and
+a 1024-token output cap. The first
 response may take longer while the model loads. Output appears when generation
 finishes. The timeout controls socket operations, not a guaranteed total deadline.
 The context guard counts UTF-8 bytes in message roles/content and the response
@@ -161,8 +269,9 @@ wrappers and escaping are not counted as model input. File content and diagnosti
 are preserved in full. This is a conservative estimate, not exact model tokenization.
 Rejections report the estimated input, available budget, and reserves. Large files,
 long diagnostics, and verbose requests may still be rejected. Keep requests small.
-There is no automatic retry, folder scanning,
-multi-file editing, persistent conversation, or execution of generated programs.
+There is no folder scanning, multi-file editing, or persistent conversation.
+Execution and bounded repair retries are available only through the explicitly
+enabled checkout mode; ordinary ask/inspect/fix/code commands do not run programs.
 
 ## Troubleshooting
 
@@ -170,7 +279,11 @@ multi-file editing, persistent conversation, or execution of generated programs.
 - Missing model: run `ollama list` and choose an installed model with `--model`.
 - Timeout: retry or increase `--timeout`.
 - Output limit: request a smaller task; partial responses are explicitly marked.
-- Context budget: select a smaller file or shorten the request. Content is not silently truncated.
+- Context budget: the error suggests an explicit `--context` value large enough for
+  the current estimate. Use it if your model and available memory support it, or
+  select a smaller file or shorten the request. Retries can grow because they send
+  the latest proposal. Content is not silently truncated, and more context does not
+  guarantee a correct repair.
 - Java dependency errors: this version checks standalone files using JDK libraries only.
 - Preview only: run in an ordinary interactive terminal with input/output attached.
 
@@ -182,7 +295,8 @@ python -m unittest discover -s tests -v
 
 The default suite uses simulated model responses and temporary sample files. It
 tests access restrictions, invalid proposals, approval/rejection, backups,
-intervening edits, terminal behavior, and compiler isolation. If `javac` is
+intervening edits, terminal behavior, compiler isolation, and the automated checkout
+loop using known test fixtures (not live model-generated programs). If `javac` is
 installed, it also compiles valid, invalid, and dependency-missing Java samples.
 Temporary-directory access must be permitted by the environment running the tests.
 

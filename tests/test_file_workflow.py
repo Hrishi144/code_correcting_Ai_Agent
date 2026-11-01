@@ -102,3 +102,32 @@ class FileWorkflowTests(unittest.TestCase):
         self.assertEqual(status, 1)
         prompt.assert_not_called()
         client.return_value.chat.assert_not_called()
+
+    def test_comment_only_fix_warns_and_preserves_repair_task_with_custom_request(self):
+        self.file.write_text("def value():\n    return 1\n", encoding="utf-8")
+        reply = ModelReply(json.dumps({
+            "explanation": "Fixed errors", "content": "# Return the value\ndef value():\n    return 1\n",
+        }))
+        status, output, _, _, client = self.invoke(
+            ["fix", "--file", "sample.py", "--request", "Explain changes in comments"], reply=reply)
+        self.assertEqual(status, 0)
+        self.assertIn("only changes comments or formatting", output)
+        self.assertIn("Model explanation (not verified)", output)
+        self.assertIn("Behavior verification: not run", output)
+        messages = client.return_value.chat.call_args.args[0]
+        self.assertIn("syntax AND logic", messages[0]["content"])
+        self.assertEqual(json.loads(messages[1]["content"])["request"], "Explain changes in comments")
+
+    def test_real_code_change_does_not_show_comment_only_warning(self):
+        self.file.write_text("def value():\n    return 2\n", encoding="utf-8")
+        status, output, _, _, _ = self.invoke(["fix", "--file", "sample.py"])
+        self.assertEqual(status, 0)
+        self.assertNotIn("only changes comments or formatting", output)
+        self.assertIn("Behavior verification: not run", output)
+
+    def test_code_command_keeps_feature_request_separate_from_repair_task(self):
+        status, output, _, _, client = self.invoke(
+            ["code", "--file", "sample.py", "--request", "Add a comment"])
+        self.assertEqual(status, 0)
+        self.assertNotIn("only changes comments or formatting", output)
+        self.assertNotIn("syntax AND logic", client.return_value.chat.call_args.args[0][0]["content"])

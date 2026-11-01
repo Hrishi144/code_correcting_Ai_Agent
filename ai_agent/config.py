@@ -3,10 +3,12 @@
 from dataclasses import dataclass
 import math
 
+TEMPLATE_RESERVE_TOKENS = 256
+
 
 @dataclass(frozen=True)
 class Settings:
-    model: str = "qwen2.5-coder:3b"
+    model: str = "qwen2.5-coder:7b"
     timeout_seconds: float = 120.0
     context_tokens: int = 4096
     output_tokens: int = 1024
@@ -16,8 +18,13 @@ class Settings:
             raise ValueError("Model name cannot be empty.")
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("Timeout must be a positive, finite number of seconds.")
-        if self.context_tokens <= 0 or self.output_tokens <= 0:
-            raise ValueError("Token limits must be positive.")
+        if any(type(value) is not int or value <= 0 for value in (self.context_tokens, self.output_tokens)):
+            raise ValueError("Token limits must be positive integers.")
+        if self.context_tokens <= self.output_tokens + TEMPLATE_RESERVE_TOKENS:
+            raise ValueError(
+                f"Context must exceed the output reserve ({self.output_tokens}) plus "
+                f"template reserve ({TEMPLATE_RESERVE_TOKENS}). Increase --context."
+            )
 
 
 OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"

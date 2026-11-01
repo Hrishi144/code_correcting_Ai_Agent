@@ -1,6 +1,7 @@
 """Reviewable file changes, backups, and explicit approval before saving."""
 
 from dataclasses import dataclass
+import ast
 import difflib
 import os
 from pathlib import Path
@@ -22,6 +23,22 @@ class ProposedChange:
     @property
     def changed(self) -> bool:
         return self.original.raw != self.original.encode(self.content)
+
+    @property
+    def python_structure_unchanged(self) -> bool:
+        """Compare Python syntax trees without executing either version.
+
+        Equal trees flag comment/formatting-only edits, not verified behavior.
+        Invalid originals, new files, and other languages are not comparable.
+        """
+        if self.original.raw is None or self.original.path.suffix.lower() != ".py":
+            return False
+        try:
+            before = ast.dump(ast.parse(self.original.text), include_attributes=False)
+            after = ast.dump(ast.parse(self.content), include_attributes=False)
+        except (SyntaxError, ValueError, RecursionError):
+            return False
+        return before == after
 
     def diff(self) -> str:
         before = self.original.text.splitlines(keepends=True)

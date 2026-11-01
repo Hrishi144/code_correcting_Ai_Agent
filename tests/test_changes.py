@@ -82,3 +82,21 @@ class ChangeTests(unittest.TestCase):
     def test_diff_marks_final_newline(self):
         change = ProposedChange(self.snapshot, "newline", "value = 1", validate("value = 1", "sample.py"))
         self.assertIn("No newline at end of file", change.diff())
+
+    def test_python_structure_comparison_distinguishes_comments_and_code(self):
+        for content, expected in (("# Explain the value\nvalue=1\n", True),
+                                  ("value = 2\n", False), ("def broken(", False)):
+            with self.subTest(content=content):
+                change = ProposedChange(self.snapshot, "Update", content, validate(content, "sample.py"))
+                self.assertEqual(change.python_structure_unchanged, expected)
+
+    def test_python_structure_comparison_handles_invalid_original_new_and_json(self):
+        self.file.write_text("def broken(", encoding="utf-8")
+        for snapshot, content in (
+            (self.workspace.snapshot("sample.py"), "value = 1"),
+            (self.workspace.snapshot("new.py", new=True), "value = 1"),
+            (self.workspace.snapshot("data.json", new=True), '{"value":1}'),
+        ):
+            with self.subTest(path=snapshot.path):
+                change = ProposedChange(snapshot, "Update", content, validate(content, snapshot.path.name))
+                self.assertFalse(change.python_structure_unchanged)

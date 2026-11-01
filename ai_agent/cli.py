@@ -5,9 +5,11 @@ import sys
 import unicodedata
 
 from .assistant import CodingAssistant
+from .behavior import check_checkout
 from .changes import save_change
 from .config import Settings
 from .ollama_client import ModelError, OllamaClient
+from .repair import repair_checkout
 from .validation import validate
 from .workspace import Workspace
 
@@ -22,6 +24,8 @@ def _model_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", default=Settings.model, help="Installed Ollama model name")
     parser.add_argument("--timeout", type=float, default=Settings.timeout_seconds,
                         help="Network timeout in seconds (default: 120)")
+    parser.add_argument("--context", type=int, default=Settings.context_tokens,
+                        help="Model context size in tokens (default: 4096); larger values need more memory")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -46,6 +50,13 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--file", required=True, help="Selected .py, .json, or .java file")
         command.add_argument("--request", required=operation == "code",
                              help="Instructions, observed error, or expected behavior")
+        if operation == "fix":
+            command.add_argument("--check", choices=["checkout"],
+                                 help="Run the fixed checkout tests and retry repairs; standalone Python only")
+            command.add_argument("--allow-execution", action="store_true",
+                                 help="Allow original and model-proposed Python to execute with your permissions (not sandboxed)")
+            command.add_argument("--max-attempts", type=int, choices=range(1, 6),
+                                 help="Maximum model proposals with --check (default: 3)")
     return parser
 
 
@@ -69,6 +80,11 @@ def _ask(args: argparse.Namespace, assistant: CodingAssistant) -> int:
 
 
 def _file_operation(args: argparse.Namespace, assistant: CodingAssistant) -> int:
+    automated = getattr(args, "check", None) == "checkout"
+    if automated and not args.allow_execution:
+        raise ValueError("--check checkout requires --allow-execution; original and proposed code will run with your permissions.")
+    if not automated and (getattr(args, "allow_execution", False) or getattr(args, "max_attempts", None) is not None):
+        raise ValueError("--allow-execution and --max-attempts require --check checkout.")
     workspace = Workspace(args.workspace)
     new_path = getattr(args, "output", None)
     snapshot = workspace.snapshot(new_path if new_path is not None else args.file, new=new_path is not None)
@@ -89,13 +105,42 @@ def _file_operation(args: argparse.Namespace, assistant: CodingAssistant) -> int
     if not request.strip():
         raise ValueError("Describe the requested change.")
     print("Preparing a proposed change...", file=sys.stderr, flush=True)
-    change = assistant.propose(snapshot, checks, request, operation=args.command)
-    print(f"\nExplanation:\n{safe_text(change.explanation)}")
+    behavior = None
+    if automated:
+        print("Execution enabled: testing temporary copies of original and proposed Python with your permissions. "
+              "This is not an OS sandbox.", file=sys.stderr, flush=True)
+        outcome = repair_checkout(
+            assistant, snapshot, request, allow_execution=args.allow_execution,
+            max_attempts=args.max_attempts or 3,
+            progress=lambda message: print(safe_text(message), file=sys.stderr, flush=True),
+        )
+        change, behavior = outcome.change, outcome.behavior
+        workspace.assert_unchanged(snapshot)
+        print(f"Repair attempts used: {outcome.attempts}")
+        if outcome.attempts == 0 and behavior.status == "passed":
+            print(f"Checkout checks: passed\n{safe_text(behavior.detail)}")
+            print("Existing file passes the selected checks. No model call or save was needed.")
+            return 0
+    else:
+        change = assistant.propose(snapshot, checks, request, operation=args.command)
+    print(f"\nModel explanation (not verified):\n{safe_text(change.explanation)}")
     print(f"\nProposed validation: {change.validation.status}\n{safe_text(change.validation.detail)}")
+    if behavior is None:
+        print("Behavior verification: not run. Correct results and instruction compliance have not been checked.")
+    else:
+        print(f"Checkout checks: {behavior.status}\n{safe_text(behavior.detail)}")
+        if behavior.status != "passed":
+            if change.changed:
+                print(f"\nLast proposed changes:\n{safe_text(change.diff())}")
+            print("Saving blocked: checkout checks did not pass. Nothing was saved.")
+            return 1
     if not change.changed:
         print("No content changes proposed. Nothing was saved.")
         return 0 if change.validation.status == "passed" else 1
     print(f"\nChanges (- original, + proposed):\n{safe_text(change.diff())}")
+    if args.command == "fix" and change.python_structure_unchanged:
+        print("Warning: Python code structure is unchanged; this proposal only changes comments or formatting. "
+              "It does not demonstrate a logic repair. Review the diff before saving.")
     if change.validation.status != "passed":
         print("Saving blocked: proposed content did not pass validation. Nothing was saved.")
         return 1
@@ -106,6 +151,13 @@ def _file_operation(args: argparse.Namespace, assistant: CodingAssistant) -> int
     if approval.strip() != "save":
         print("Rejected. Nothing was saved.")
         return 0
+    if automated:
+        workspace.assert_unchanged(snapshot)
+        print("Rechecking checkout behavior before saving...", file=sys.stderr, flush=True)
+        final_check = check_checkout(snapshot, change.content)
+        if final_check.status != "passed":
+            print(f"Saving blocked: checkout recheck {final_check.status}.\n{safe_text(final_check.detail)}")
+            return 1
     backup = save_change(workspace, change, approved=True)
     print(f"Saved: {safe_text(str(snapshot.path))}")
     if backup is not None:
@@ -120,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         arguments.insert(0, "ask")
     args = _parser().parse_args(arguments)
     try:
-        settings = Settings(model=args.model, timeout_seconds=args.timeout)
+        settings = Settings(model=args.model, timeout_seconds=args.timeout, context_tokens=args.context)
         assistant = CodingAssistant(OllamaClient(settings))
         if args.command == "ask":
             return _ask(args, assistant)

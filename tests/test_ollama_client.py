@@ -24,7 +24,7 @@ class OllamaClientTests(unittest.TestCase):
         self.assertEqual(request.full_url, "http://127.0.0.1:11434/api/chat")
         payload = json.loads(request.data)
         self.assertFalse(payload["stream"])
-        self.assertEqual(payload["model"], "qwen2.5-coder:3b")
+        self.assertEqual(payload["model"], "qwen2.5-coder:7b")
         self.assertEqual(payload["options"]["num_ctx"], 4096)
 
     def test_bad_responses(self):
@@ -92,4 +92,25 @@ class OllamaClientTests(unittest.TestCase):
     def test_multibyte_input_counts_utf8_bytes(self):
         with self.assertRaisesRegex(ModelError, "estimated input 3604"):
             self.client.chat([{"role": "user", "content": "é" * 1800}])
+        self.client._opener.open.assert_not_called()
+
+    def test_reported_3614_byte_request_can_use_explicit_larger_context(self):
+        messages = [{"role": "user", "content": "x" * 3610}]
+        with self.assertRaisesRegex(ModelError, "estimated input 3614, available 2816") as error:
+            self.client.chat(messages)
+        self.assertIn("--context 8192", str(error.exception))
+        self.client._opener.open.assert_not_called()
+
+        self.client = OllamaClient(Settings(context_tokens=8192))
+        self.client._opener = Mock()
+        self.respond(b'{"message":{"content":"ok"},"done":true}')
+        self.assertEqual(self.client.chat(messages).text, "ok")
+        payload = json.loads(self.client._opener.open.call_args.args[0].data)
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+        self.assertEqual(payload["options"]["num_predict"], 1024)
+        self.assertEqual(payload["messages"], messages)
+
+        self.client._opener.reset_mock()
+        with self.assertRaisesRegex(ModelError, "--context 16384"):
+            self.client.chat([{"role": "user", "content": "x" * 7000}])
         self.client._opener.open.assert_not_called()
